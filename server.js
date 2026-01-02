@@ -19,7 +19,7 @@ app.get("/test-duffel", async (req, res) => {
       {
        headers: {
   Authorization: `Bearer ${process.env.DUFFEL_ACCESS_TOKEN}`,
-  "Duffel-Version": "v2",
+  "Duffel-Version": "v1",
 },
 
       }
