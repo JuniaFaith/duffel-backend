@@ -15,7 +15,7 @@ app.get("/", (req, res) => {
 app.get("/test-duffel", async (req, res) => {
   try {
     const response = await fetch(
-      `${process.env.DUFFEL_BASE_URL}/airlines?limit=5`,
+${process.env.DUFFEL_BASE_URL}/air/airlines?limit=5
       {
        headers: {
   Authorization: `Bearer ${process.env.DUFFEL_ACCESS_TOKEN}`,
