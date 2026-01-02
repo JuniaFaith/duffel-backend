@@ -98,6 +98,7 @@ app.post("/quote", async (req, res) => {
     };
 
     const results = [];
+const errors = [];
 
     for (const destination of destinationPool) {
       if (destination === origin) continue;
@@ -123,7 +124,17 @@ const reqResp = await fetch(`${duffelBaseUrl}/air/offer_requests`, {
   body: JSON.stringify(payload)
 });
 
-if (!reqResp.ok) continue;
+if (!reqResp.ok) {
+  const body = await reqResp.text();
+  errors.push({
+    step: "offer_request",
+    destination,
+    status: reqResp.status,
+    body: body.slice(0, 300)
+  });
+  continue;
+}
+
 
 const reqJson = await reqResp.json();
 const offerRequestId = reqJson?.data?.id;
@@ -135,7 +146,17 @@ const offersResp = await fetch(
   { headers }
 );
 
-if (!offersResp.ok) continue;
+if (!offersResp.ok) {
+  const body = await offersResp.text();
+  errors.push({
+    step: "offers_fetch",
+    destination,
+    status: offersResp.status,
+    body: body.slice(0, 300)
+  });
+  continue;
+}
+
 
 const offersJson = await offersResp.json();
 const offers = offersJson?.data || [];
@@ -162,8 +183,13 @@ if (offers.length === 0) continue;
     }
 
     if (results.length === 0) {
-      return res.status(404).json({ error: "No eligible offers found" });
-    }
+  return res.status(502).json({
+    error: "No eligible offers found",
+    hint: "Duffel calls were skipped or returned no offers. See errors_sample.",
+    errors_sample: errors.slice(0, 5)
+  });
+}
+
 
     const winner = results.reduce((min, r) => {
       if (!min) return r;
