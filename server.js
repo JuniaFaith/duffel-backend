@@ -40,7 +40,7 @@ app.post("/search", async (req, res) => {
         method: "POST",
         headers: {
           Authorization: `Bearer ${process.env.DUFFEL_ACCESS_TOKEN}`,
-          "Duffel-Version": "v2",
+          "Duffel-Version": "v1",
           "Content-Type": "application/json",
         },
         body: JSON.stringify({ data: req.body }),
