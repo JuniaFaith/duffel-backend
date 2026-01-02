@@ -116,18 +116,30 @@ app.post("/quote", async (req, res) => {
         }
       };
 
-      const resp = await fetch(`${duffelBaseUrl}/air/offer_requests`, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(payload)
-      });
+    // 1. Create offer request
+const reqResp = await fetch(`${duffelBaseUrl}/air/offer_requests`, {
+  method: "POST",
+  headers,
+  body: JSON.stringify(payload)
+});
 
-      if (!resp.ok) continue;
+if (!reqResp.ok) continue;
 
-      const json = await resp.json();
-      const offers = json?.data?.offers || [];
-      if (offers.length === 0) continue;
+const reqJson = await reqResp.json();
+const offerRequestId = reqJson?.data?.id;
+if (!offerRequestId) continue;
 
+// 2. Fetch offers for that request
+const offersResp = await fetch(
+  `${duffelBaseUrl}/air/offers?offer_request_id=${offerRequestId}`,
+  { headers }
+);
+
+if (!offersResp.ok) continue;
+
+const offersJson = await offersResp.json();
+const offers = offersJson?.data || [];
+if (offers.length === 0) continue;
       const cheapest = offers.reduce((min, o) => {
         const price = Number(o.total_amount);
         if (!min) return o;
