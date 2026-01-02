@@ -60,5 +60,8 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`✅ Duffel backend running on http://localhost:${PORT}`);
 });
+app.get("/health", (req, res) => {
+  res.status(200).json({ ok: true });
+});
 
 
