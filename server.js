@@ -1,49 +1,64 @@
-// server.js (CommonJS) — REPLACE THE WHOLE FILE WITH THIS
+// server.js (CommonJS) — Render + Duffel v2
+// Endpoints:
+//   GET  /health
+//   POST /quote  -> creates an offer_request, returns offer_id + passenger_id + price
+//   POST /hold   -> creates a HOLD order using offer_id + passenger details
 
 const express = require("express");
-const cors = require("cors");
 
 const app = express();
-app.use(cors({ origin: "*" }));
 app.use(express.json());
 
-const PORT = process.env.PORT || 3000;
-const DUFFEL_ACCESS_TOKEN = process.env.DUFFEL_ACCESS_TOKEN;
+// ---- CORS (fix Hoppscotch browser "Network Error") ----
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, Duffel-Version"
+  );
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  if (req.method === "OPTIONS") return res.sendStatus(204);
+  next();
+});
 
-// ---- Helpers ----
-function requireEnv() {
-  if (!DUFFEL_ACCESS_TOKEN) {
-    throw new Error("Missing DUFFEL_ACCESS_TOKEN in Render Environment variables.");
-  }
+// ---- ENV ----
+const DUFFEL_API_TOKEN = process.env.DUFFEL_API_TOKEN;
+const DUFFEL_BASE_URL = process.env.DUFFEL_BASE_URL || "https://api.duffel.com";
+const DUFFEL_VERSION = "v2"; // IMPORTANT: Duffel docs now show v2 :contentReference[oaicite:4]{index=4}
+
+if (!DUFFEL_API_TOKEN) {
+  console.warn("⚠️ Missing DUFFEL_API_TOKEN env var");
 }
 
-async function duffelFetch(path, method = "GET", body) {
-  requireEnv();
+// ---- Helpers ----
+async function duffelFetch(path, { method = "GET", body } = {}) {
+  const url = `${DUFFEL_BASE_URL}${path}`;
 
-  const url = `https://api.duffel.com${path}`;
-  const res = await fetch(url, {
+  const headers = {
+    Accept: "application/json",
+    "Content-Type": "application/json",
+    "Duffel-Version": DUFFEL_VERSION,
+    Authorization: `Bearer ${DUFFEL_API_TOKEN}`,
+  };
+
+  const resp = await fetch(url, {
     method,
-    headers: {
-      Authorization: `Bearer ${DUFFEL_ACCESS_TOKEN}`,
-      "Duffel-Version": "beta",
-      "Content-Type": "application/json",
-      Accept: "application/json",
-    },
+    headers,
     body: body ? JSON.stringify(body) : undefined,
   });
 
-  const text = await res.text();
+  const text = await resp.text();
   let json;
   try {
     json = JSON.parse(text);
-  } catch (e) {
+  } catch {
     json = { raw: text };
   }
 
-  if (!res.ok) {
-    const err = new Error(`Duffel API error ${res.status}`);
-    err.status = res.status;
-    err.data = json;
+  if (!resp.ok) {
+    const err = new Error("Duffel request failed");
+    err.status = resp.status;
+    err.details = json;
     throw err;
   }
 
@@ -51,48 +66,37 @@ async function duffelFetch(path, method = "GET", body) {
 }
 
 function missingFields(obj, fields) {
-  return fields.filter((f) => obj?.[f] === undefined || obj?.[f] === null || obj?.[f] === "");
+  return fields.filter((f) => !obj || obj[f] === undefined || obj[f] === null || obj[f] === "");
 }
 
 // ---- Routes ----
-app.get("/", (req, res) => {
-  res.json({ ok: true, service: "duffel-backend" });
-});
+app.get("/health", (req, res) => res.json({ ok: true }));
 
-app.get("/health", (req, res) => {
-  res.json({ ok: true });
-});
-
-/**
- * POST /quote
- * Body:
- * {
- *   "name": "Test User",
- *   "origin": "BKK",
- *   "destination": "PNH",
- *   "date": "2026-02-02",
- *   "cabin_class": "economy"   // optional
- * }
- */
 app.post("/quote", async (req, res) => {
   try {
-    const { name, origin, destination, date } = req.body;
-    const cabin_class = req.body.cabin_class || "economy";
-
-    const missing = missingFields(req.body, ["name", "origin", "destination", "date"]);
+    const required = ["name", "origin", "destination", "date"];
+    const missing = missingFields(req.body, required);
     if (missing.length) {
       return res.status(400).json({
         ok: false,
         error: `Missing ${missing.join(", ")}`,
+        example: {
+          name: "Test User",
+          origin: "BKK",
+          destination: "PNH",
+          date: "2026-02-02",
+        },
       });
     }
 
-    // Create offer request and return offers immediately
-    const offerReq = await duffelFetch(
-      "/air/offer_requests?return_offers=true",
-      "POST",
-      {
+    const { name, origin, destination, date } = req.body;
+
+    // Create offer request
+    const offerReq = await duffelFetch("/air/offer_requests", {
+      method: "POST",
+      body: {
         data: {
+          cabin_class: "economy",
           slices: [
             {
               origin,
@@ -101,26 +105,24 @@ app.post("/quote", async (req, res) => {
             },
           ],
           passengers: [{ type: "adult" }],
-          cabin_class,
         },
-      }
-    );
+      },
+    });
 
-    const offers = offerReq?.data?.offers || [];
+    const data = offerReq.data || {};
+    const offers = data.offers || [];
+    const passengers = data.passengers || [];
+
     if (!offers.length) {
-      return res.status(502).json({
+      return res.status(400).json({
         ok: false,
-        error: "No offers returned from Duffel.",
+        error: "No offers returned from Duffel for that route/date.",
         duffel: offerReq,
       });
     }
 
-    // Pick cheapest
-    offers.sort((a, b) => Number(a.total_amount) - Number(b.total_amount));
-    const cheapest = offers[0];
-
-    // Passenger ID comes from the offer object
-    const passenger_id = cheapest?.passengers?.[0]?.id;
+    const offer = offers[0];
+    const passenger = passengers[0];
 
     return res.json({
       ok: true,
@@ -129,123 +131,104 @@ app.post("/quote", async (req, res) => {
         origin,
         destination,
         date,
-        offer_id: cheapest.id,
-        passenger_id,
-        total_amount: cheapest.total_amount,
-        total_currency: cheapest.total_currency,
+        offer_id: offer.id,
+        passenger_id: passenger ? passenger.id : null,
+        total_amount: offer.total_amount,
+        total_currency: offer.total_currency,
       },
     });
-  } catch (err) {
-    console.error("QUOTE ERROR:", err?.status, err?.data || err?.message);
-
-    return res.status(err.status || 500).json({
+  } catch (e) {
+    return res.status(500).json({
       ok: false,
       error: "Quote failed",
-      duffel_status: err.status || null,
-      duffel_error: err.data || err.message,
+      duffel_status: e.status,
+      duffel_error: e.details,
     });
   }
 });
 
-/**
- * POST /hold
- * This creates an order WITHOUT payment (acts like a hold).
- *
- * Body:
- * {
- *   "offer_id": "off_...",
- *   "passenger_id": "pas_...",
- *   "given_name": "Test",
- *   "family_name": "User",
- *   "email": "test@example.com",
- *   "born_on": "1990-01-01",
- *   "gender": "m",             // "m" or "f" typically
- *   "title": "mr",             // often "mr", "ms", "mrs" etc (varies)
- *   "phone_number": "+61400000000"  // optional but useful
- * }
- */
 app.post("/hold", async (req, res) => {
   try {
+    // Duffel hold order needs a passenger object with required fields (docs example) :contentReference[oaicite:5]{index=5}
+    const required = [
+      "offer_id",
+      "passenger_id",
+      "given_name",
+      "family_name",
+      "email",
+      "phone_number",
+      "born_on",
+      "gender",
+      "title",
+    ];
+    const missing = missingFields(req.body, required);
+    if (missing.length) {
+      return res.status(400).json({
+        ok: false,
+        error: `Missing ${missing.join(", ")}`,
+        example: {
+          offer_id: "off_xxx_from_/quote",
+          passenger_id: "pas_xxx_from_/quote",
+          given_name: "Test",
+          family_name: "User",
+          email: "test@example.com",
+          phone_number: "+61400111222",
+          born_on: "1987-07-24",
+          gender: "f",
+          title: "mrs",
+        },
+      });
+    }
+
     const {
       offer_id,
       passenger_id,
       given_name,
       family_name,
       email,
+      phone_number,
       born_on,
       gender,
       title,
-      phone_number,
     } = req.body;
 
-    // These are the common “minimum” fields Duffel usually needs to create an order.
-    // If Duffel requires fewer/more, we’ll see it clearly in the returned Duffel error now.
-    const required = ["offer_id", "passenger_id", "given_name", "family_name", "email", "born_on", "gender", "title"];
-    const missing = missingFields(req.body, required);
-
-    if (missing.length) {
-      return res.status(400).json({
-        ok: false,
-        error: `Missing ${missing.join(", ")}`,
-        example_body: {
-          offer_id: "off_...",
-          passenger_id: "pas_...",
-          given_name: "Test",
-          family_name: "User",
-          email: "test@example.com",
-          born_on: "1990-01-01",
-          gender: "m",
-          title: "mr",
-          phone_number: "+61400000000",
+    const order = await duffelFetch("/air/orders", {
+      method: "POST",
+      body: {
+        data: {
+          type: "hold",
+          selected_offers: [offer_id],
+          passengers: [
+            {
+              id: passenger_id,
+              given_name,
+              family_name,
+              email,
+              phone_number,
+              born_on,
+              gender,
+              title,
+              type: "adult",
+            },
+          ],
         },
-      });
-    }
-
-    const order = await duffelFetch("/air/orders", "POST", {
-      data: {
-        selected_offers: [offer_id],
-        passengers: [
-          {
-            id: passenger_id,
-            given_name,
-            family_name,
-            email,
-            born_on,
-            gender,
-            title,
-            phone_number: phone_number || undefined,
-          },
-        ],
-        // IMPORTANT: no payments field = order created without payment (hold-style)
       },
     });
-
-    const o = order?.data;
 
     return res.json({
       ok: true,
-      hold: {
-        order_id: o?.id,
-        booking_reference: o?.booking_reference || null,
-        payment_required_by: o?.payment_required_by || null,
-        total_amount: o?.total_amount || null,
-        total_currency: o?.total_currency || null,
-      },
-      duffel: order,
+      order: order.data,
     });
-  } catch (err) {
-    console.error("HOLD ERROR:", err?.status, err?.data || err?.message);
-
-    return res.status(err.status || 500).json({
+  } catch (e) {
+    return res.status(500).json({
       ok: false,
       error: "Hold failed",
-      duffel_status: err.status || null,
-      // This is the key change: show the real Duffel error payload
-      duffel_error: err.data || err.message,
+      duffel_status: e.status,
+      duffel_error: e.details,
     });
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+// ---- Start ----
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
