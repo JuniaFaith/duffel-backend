@@ -1,5 +1,4 @@
 const express = require("express");
-const fetch = require("node-fetch");
 
 const app = express();
 app.use(express.json());
@@ -76,7 +75,7 @@ app.post("/quote", async (req, res) => {
     );
 
     const offerReqData = await offerReqRes.json();
-    const offerId = offerReqData.data.offers[0].id;
+    const offer = offerReqData.data.offers[0];
 
     res.json({
       ok: true,
@@ -85,10 +84,10 @@ app.post("/quote", async (req, res) => {
         origin,
         destination,
         date,
-        offer_id: offerId,
+        offer_id: offer.id,
         passenger_id: passengerId,
-        total_amount: offerReqData.data.offers[0].total_amount,
-        total_currency: offerReqData.data.offers[0].total_currency,
+        total_amount: offer.total_amount,
+        total_currency: offer.total_currency,
       },
     });
   } catch (err) {
@@ -102,8 +101,13 @@ app.post("/quote", async (req, res) => {
 // -------------------
 app.post("/hold", async (req, res) => {
   try {
-    const { offer_id, passenger_id, given_name, family_name, email } =
-      req.body;
+    const {
+      offer_id,
+      passenger_id,
+      given_name,
+      family_name,
+      email,
+    } = req.body;
 
     if (!offer_id || !passenger_id) {
       return res.status(400).json({
@@ -151,5 +155,5 @@ app.post("/hold", async (req, res) => {
 // -------------------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`Duffel backend running on port ${PORT}`);
 });
