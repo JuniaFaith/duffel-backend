@@ -1,365 +1,324 @@
-// server.js
-// Duffel backend (Render) — /health, /airlines, /quote, /hold
+/**
+ * server.js — Duffel v2 backend (Render-friendly)
+ *
+ * Endpoints:
+ *   GET  /health
+ *   POST /quote  -> find cheapest offer (prefer hold-eligible)
+ *   POST /hold   -> create Duffel order of type "hold" (no payment)
+ *   POST /pay    -> (optional) pay for an order later using balance
+ *
+ * ENV required:
+ *   DUFFEL_API_KEY=...
+ *
+ * Optional ENV:
+ *   DUFFEL_BASE_URL=https://api.duffel.com
+ *   DUFFEL_VERSION=v2
+ *   PORT=3000 (Render sets this automatically)
+ */
 
 import express from "express";
+import cors from "cors";
+import "dotenv/config";
 
 const app = express();
+
+app.use(cors());
 app.use(express.json());
 
-// ====== Config ======
 const PORT = process.env.PORT || 3000;
+
 const DUFFEL_API_KEY = process.env.DUFFEL_API_KEY;
+const DUFFEL_BASE_URL = process.env.DUFFEL_BASE_URL || "https://api.duffel.com";
+const DUFFEL_VERSION = process.env.DUFFEL_VERSION || "v2";
 
-// Duffel API base
-const DUFFEL_BASE_URL = "https://api.duffel.com";
-
-// Duffel API version header (this is the one that was causing "unsupported version" before)
-const DUFFEL_VERSION = "v2";
-
-// A small list of "nearby / common onward" destinations to test against.
-// You can edit this list later.
-const DEFAULT_DESTINATIONS = [
-  "PNH", // Phnom Penh
-  "KUL", // Kuala Lumpur
-  "SIN", // Singapore
-  "SGN", // Ho Chi Minh City
-  "HAN", // Hanoi
-  "DPS", // Bali
-  "HKT", // Phuket
-  "CNX"  // Chiang Mai
-];
-
-// ====== Helpers ======
-function requireDuffelKey(res) {
-  if (!DUFFEL_API_KEY) {
-    res.status(500).json({
-      ok: false,
-      error: "Missing DUFFEL_API_KEY in environment variables (Render → Environment)."
-    });
-    return false;
-  }
-  return true;
+if (!DUFFEL_API_KEY) {
+  console.warn("⚠️ Missing DUFFEL_API_KEY environment variable.");
 }
 
-async function duffelFetch(path, options = {}) {
-  const url = `${DUFFEL_BASE_URL}${path}`;
-  const headers = {
-    "Authorization": `Bearer ${DUFFEL_API_KEY}`,
-    "Duffel-Version": DUFFEL_VERSION,
-    "Content-Type": "application/json",
-    ...(options.headers || {})
-  };
-
-  const response = await fetch(url, { ...options, headers });
-
-  // Try to parse JSON always (Duffel responds JSON on errors too)
-  const data = await response.json().catch(() => null);
-
-  return { response, data };
-}
-
-function splitName(fullName = "") {
-  const trimmed = String(fullName).trim();
-  if (!trimmed) return { given_name: "Test", family_name: "User" };
-
-  const parts = trimmed.split(/\s+/);
-  if (parts.length === 1) return { given_name: parts[0], family_name: "User" };
-
+function duffelHeaders() {
   return {
-    given_name: parts.slice(0, -1).join(" "),
-    family_name: parts.slice(-1).join("")
+    Authorization: `Bearer ${DUFFEL_API_KEY}`,
+    "Duffel-Version": DUFFEL_VERSION,
+    Accept: "application/json",
+    "Content-Type": "application/json",
   };
 }
 
-function pickCheapestOffer(offers = []) {
-  // Duffel offers typically have total_amount + total_currency
-  // total_amount is a string number like "97.32"
-  if (!Array.isArray(offers) || offers.length === 0) return null;
-
-  let cheapest = null;
-
-  for (const offer of offers) {
-    const amt = Number(offer?.total_amount);
-    if (!Number.isFinite(amt)) continue;
-    if (!cheapest) {
-      cheapest = offer;
-      continue;
-    }
-    const cheapestAmt = Number(cheapest?.total_amount);
-    if (amt < cheapestAmt) cheapest = offer;
-  }
-
-  return cheapest;
-}
-
-async function getOfferById(offer_id) {
-  const { response, data } = await duffelFetch(`/air/offers/${offer_id}`, {
-    method: "GET"
+async function duffelFetch(path, { method = "GET", body } = {}) {
+  const res = await fetch(`${DUFFEL_BASE_URL}${path}`, {
+    method,
+    headers: duffelHeaders(),
+    body: body ? JSON.stringify(body) : undefined,
   });
 
-  if (!response.ok) {
-    return {
-      ok: false,
-      status: response.status,
-      data
-    };
+  const data = await res.json().catch(() => ({}));
+
+  if (!res.ok) {
+    const msg =
+      data?.errors?.[0]?.message ||
+      data?.message ||
+      `Duffel error (${res.status})`;
+    const err = new Error(msg);
+    err.status = res.status;
+    err.data = data;
+    throw err;
   }
 
-  return {
-    ok: true,
-    offer: data?.data
-  };
+  return data;
 }
 
-// ====== Routes ======
-app.get("/", (req, res) => {
-  res.json({ ok: true, service: "duffel-backend" });
-});
+// --------------------
+// Basics
+// --------------------
+app.get("/", (_req, res) => res.json({ ok: true, service: "duffel-backend" }));
 
-app.get("/health", (req, res) => {
-  res.json({ ok: true });
-});
+app.get("/health", (_req, res) => res.json({ ok: true }));
 
-// Simple passthrough test: list airlines
-app.get("/airlines", async (req, res) => {
+// Handy test endpoint (optional)
+app.get("/air/airlines", async (_req, res) => {
   try {
-    if (!requireDuffelKey(res)) return;
-
-    const limit = req.query.limit || 5;
-    const { response, data } = await duffelFetch(`/air/airlines?limit=${limit}`, {
-      method: "GET"
-    });
-
-    return res.status(response.status).json(data);
+    const data = await duffelFetch("/air/airlines?limit=5");
+    res.json(data);
   } catch (err) {
-    return res.status(500).json({ ok: false, error: err.message });
+    res.status(err.status || 500).json({ error: err.message, details: err.data });
   }
 });
 
-/**
- * POST /quote
- * Finds the cheapest valid onward flight from an origin to a "best" destination
- * using a small destination shortlist.
- *
- * Body:
- * {
- *   "name": "Test User",
- *   "origin": "BKK",
- *   "date": "2026-02-02"
- * }
- */
+// --------------------
+// POST /quote
+// Body:
+// {
+//   "name": "Test User",
+//   "origin": "BKK",
+//   "date": "2026-02-02",
+//   "destinations": ["PNH","KUL","SIN"]   // optional
+// }
+//
+// Returns cheapest offer (prefers hold-eligible where possible) + offer_id + passenger_id
+// --------------------
 app.post("/quote", async (req, res) => {
   try {
-    if (!requireDuffelKey(res)) return;
-
     const { name, origin, date, destinations } = req.body || {};
 
     if (!name || !origin || !date) {
-      return res.status(400).json({
-        ok: false,
-        error: "Missing name, origin, or date"
-      });
+      return res.status(400).json({ error: "Missing name, origin, or date" });
     }
 
-    const destinationList = Array.isArray(destinations) && destinations.length > 0
-      ? destinations
-      : DEFAULT_DESTINATIONS;
+    // Reasonable default onward destinations (edit anytime)
+    const destList =
+      Array.isArray(destinations) && destinations.length > 0
+        ? destinations
+        : ["PNH", "KUL", "SIN", "SGN", "HAN", "CGK"];
 
-    // Create offers for each destination and choose the cheapest
-    const offersFound = [];
-
-    for (const destination of destinationList) {
-      // Skip if destination equals origin
-      if (String(destination).toUpperCase() === String(origin).toUpperCase()) continue;
-
-      // 1) Create offer request
-      const offerRequestPayload = {
+    // 1) Create offer request
+    // Duffel doc example uses offer_requests with v2 header :contentReference[oaicite:1]{index=1}
+    const offerRequest = await duffelFetch("/air/offer_requests", {
+      method: "POST",
+      body: {
         data: {
-          slices: [
-            {
-              origin: String(origin).toUpperCase(),
-              destination: String(destination).toUpperCase(),
-              departure_date: String(date)
-            }
-          ],
+          slices: destList.map((dest) => ({
+            origin: origin.toUpperCase(),
+            destination: dest.toUpperCase(),
+            departure_date: date,
+          })),
           passengers: [{ type: "adult" }],
-          cabin_class: "economy"
-        }
-      };
+          cabin_class: "economy",
+        },
+      },
+    });
 
-      const { response: orResp, data: orData } = await duffelFetch("/air/offer_requests", {
-        method: "POST",
-        body: JSON.stringify(offerRequestPayload)
-      });
+    const offerRequestId = offerRequest?.data?.id;
+    const passengerId = offerRequest?.data?.passengers?.[0]?.id;
 
-      if (!orResp.ok) {
-        // just skip this destination
-        continue;
-      }
-
-      // 2) Get offers
-      // Duffel sometimes returns offers inside "offers" or requires a follow-up list call.
-      let offers = [];
-
-      // Common patterns:
-      // - orData.data.offers (some SDKs/versions)
-      // - orData.included contains offers
-      if (Array.isArray(orData?.data?.offers)) {
-        offers = orData.data.offers;
-      } else if (Array.isArray(orData?.included)) {
-        offers = orData.included.filter((x) => x?.type === "offer");
-      }
-
-      // If none returned, do a list call using the offer_request id
-      if (offers.length === 0 && orData?.data?.id) {
-        const offerRequestId = orData.data.id;
-
-        const { response: listResp, data: listData } = await duffelFetch(
-          `/air/offers?offer_request_id=${offerRequestId}&limit=50`,
-          { method: "GET" }
-        );
-
-        if (listResp.ok && Array.isArray(listData?.data)) {
-          offers = listData.data;
-        }
-      }
-
-      const cheapest = pickCheapestOffer(offers);
-      if (cheapest) {
-        offersFound.push({
-          destination: String(destination).toUpperCase(),
-          offer: cheapest
-        });
-      }
+    if (!offerRequestId) {
+      return res.status(500).json({ error: "No offer_request id returned" });
     }
 
-    if (offersFound.length === 0) {
-      return res.status(404).json({
-        ok: false,
-        error: "No offers found for the provided origin/date."
-      });
+    // 2) List offers for that request
+    // (Duffel supports offers listing by offer_request_id)
+    const offersResp = await duffelFetch(
+      `/air/offers?offer_request_id=${encodeURIComponent(offerRequestId)}&limit=200`
+    );
+
+    const offers = offersResp?.data || [];
+    if (!offers.length) {
+      return res.status(404).json({ error: "No offers returned for these routes/date" });
     }
 
-    // Pick cheapest across destinations
-    let best = offersFound[0];
-    for (const item of offersFound) {
-      const amt = Number(item.offer?.total_amount);
-      const bestAmt = Number(best.offer?.total_amount);
-      if (Number.isFinite(amt) && Number.isFinite(bestAmt) && amt < bestAmt) {
-        best = item;
-      }
-    }
+    // Prefer offers that can be held (requires_instant_payment === false)
+    // Per Duffel guide :contentReference[oaicite:2]{index=2}
+    const holdEligible = offers.filter(
+      (o) => o?.payment_requirements?.requires_instant_payment === false
+    );
 
-    const { given_name, family_name } = splitName(name);
+    const pool = holdEligible.length ? holdEligible : offers;
+
+    // Cheapest by total_amount (string -> number)
+    const cheapest = pool.reduce((best, cur) => {
+      const curAmt = Number(cur?.total_amount ?? Infinity);
+      const bestAmt = Number(best?.total_amount ?? Infinity);
+      return curAmt < bestAmt ? cur : best;
+    }, pool[0]);
+
+    const firstSlice = cheapest?.slices?.[0];
+    const destination = firstSlice?.destination?.iata_code || firstSlice?.destination || null;
 
     return res.json({
       ok: true,
       quote: {
         name,
-        origin: String(origin).toUpperCase(),
-        destination: best.destination,
-        date: String(date),
-        offer_id: best.offer.id,
-        total_amount: best.offer.total_amount,
-        total_currency: best.offer.total_currency,
-        passenger_name_parsed: { given_name, family_name }
-      }
+        origin: origin.toUpperCase(),
+        destination,
+        date,
+        offer_id: cheapest?.id,
+        total_amount: cheapest?.total_amount,
+        total_currency: cheapest?.total_currency,
+        // helpful for hold flow:
+        passenger_id: passengerId,
+        hold_eligible:
+          cheapest?.payment_requirements?.requires_instant_payment === false,
+        payment_required_by: cheapest?.payment_requirements?.payment_required_by || null,
+        price_guarantee_expires_at:
+          cheapest?.payment_requirements?.price_guarantee_expires_at || null,
+      },
     });
   } catch (err) {
-    return res.status(500).json({ ok: false, error: err.message });
+    res.status(err.status || 500).json({ error: err.message, details: err.data });
   }
 });
 
-/**
- * POST /hold  (Path 2: hold-first flow)
- *
- * Body:
- * {
- *   "offer_id": "off_xxx",
- *   "name": "Test User"
- * }
- *
- * Creates a Duffel Order with payment_required=false (a hold).
- * Returns order_id, pnr (booking reference), and expiry if provided by Duffel.
- */
+// --------------------
+// POST /hold
+// Body:
+// {
+//   "offer_id": "...",
+//   "passenger_id": "...",          // recommended; if missing we'll try to fetch from offer
+//   "given_name": "Test",           // optional
+//   "family_name": "User",          // optional
+//   "email": "test@example.com",    // optional
+//   "phone_number": "+61400000000", // optional
+//   "born_on": "1980-07-24",        // optional
+//   "title": "mr",                  // optional
+//   "gender": "m"                   // optional
+// }
+//
+// Creates order with type "hold" and NO payments (Duffel guide) :contentReference[oaicite:3]{index=3}
+// --------------------
 app.post("/hold", async (req, res) => {
   try {
-    if (!requireDuffelKey(res)) return;
-
-    const { offer_id, name, born_on, title } = req.body || {};
-
-    if (!offer_id || !name) {
-      return res.status(400).json({
-        ok: false,
-        error: "Missing offer_id or name"
-      });
-    }
-
-    // Fetch offer to get passenger IDs (Duffel requires passenger objects on order creation)
-    const offerResult = await getOfferById(offer_id);
-    if (!offerResult.ok) {
-      return res.status(offerResult.status || 400).json({
-        ok: false,
-        error: "Failed to fetch offer details",
-        details: offerResult.data
-      });
-    }
-
-    const offer = offerResult.offer;
-
-    const { given_name, family_name } = splitName(name);
-
-    // Duffel typically requires passenger details on Order creation.
-    // We'll map offer passengers and provide minimal safe defaults.
-    const passengers = (offer?.passengers || []).map((p) => ({
-      id: p.id,
-      title: title || "mr",
+    const {
+      offer_id,
+      passenger_id,
       given_name,
       family_name,
-      // born_on is often required by airlines; use provided or a placeholder.
-      born_on: born_on || "1990-01-01"
-    }));
+      email,
+      phone_number,
+      born_on,
+      title,
+      gender,
+    } = req.body || {};
 
-    const orderPayload = {
-      data: {
-        selected_offers: [offer_id],
-        payment_required: false,
-        passengers
+    if (!offer_id) {
+      return res.status(400).json({ error: "Missing offer_id" });
+    }
+
+    // If passenger_id not provided, try to fetch the offer and take first passenger id
+    let passengerId = passenger_id;
+
+    if (!passengerId) {
+      try {
+        const offer = await duffelFetch(`/air/offers/${encodeURIComponent(offer_id)}`);
+        passengerId = offer?.data?.passengers?.[0]?.id || null;
+      } catch (_e) {
+        // ignore; we'll error below if still missing
       }
-    };
+    }
 
-    const { response, data } = await duffelFetch("/air/orders", {
-      method: "POST",
-      body: JSON.stringify(orderPayload)
-    });
-
-    if (!response.ok) {
-      return res.status(response.status).json({
-        ok: false,
-        error: "Duffel order (hold) failed",
-        details: data
+    if (!passengerId) {
+      return res.status(400).json({
+        error:
+          "Missing passenger_id. Use the passenger_id returned from /quote (recommended).",
       });
     }
 
-    const order = data?.data;
+    const orderResp = await duffelFetch("/air/orders", {
+      method: "POST",
+      body: {
+        data: {
+          type: "hold",
+          selected_offers: [offer_id],
+          passengers: [
+            {
+              id: passengerId,
+              given_name: given_name || "Test",
+              family_name: family_name || "User",
+              email: email || "test@example.com",
+              phone_number: phone_number || "+61400000000",
+              born_on: born_on || "1980-07-24",
+              title: title || "mr",
+              gender: gender || "m",
+            },
+          ],
+          // IMPORTANT: omit "payments" entirely for hold orders :contentReference[oaicite:4]{index=4}
+        },
+      },
+    });
+
+    const order = orderResp?.data;
 
     return res.json({
       ok: true,
       hold: {
-        order_id: order?.id || null,
-        pnr: order?.booking_reference || null,
-        // Duffel may provide one of these fields depending on provider/airline
-        expires_at: order?.expires_at || order?.payment_due_at || null,
-        total_amount: order?.total_amount || offer?.total_amount || null,
-        total_currency: order?.total_currency || offer?.total_currency || null
-      }
+        order_id: order?.id,
+        type: order?.type,
+        total_amount: order?.total_amount,
+        total_currency: order?.total_currency,
+        payment_status: order?.payment_status || null,
+      },
+      raw: orderResp,
     });
   } catch (err) {
-    return res.status(500).json({ ok: false, error: err.message });
+    res.status(err.status || 500).json({ error: err.message, details: err.data });
   }
 });
 
-// ====== Start server ======
+// --------------------
+// POST /pay (optional)
+// Body:
+// {
+//   "order_id": "...",
+//   "amount": "97.32",
+//   "currency": "AUD"
+// }
+// Uses Duffel "create payment" with type "balance" :contentReference[oaicite:5]{index=5}
+// --------------------
+app.post("/pay", async (req, res) => {
+  try {
+    const { order_id, amount, currency } = req.body || {};
+    if (!order_id || !amount || !currency) {
+      return res.status(400).json({ error: "Missing order_id, amount, or currency" });
+    }
+
+    const paymentResp = await duffelFetch("/air/payments", {
+      method: "POST",
+      body: {
+        data: {
+          order_id,
+          payment: {
+            type: "balance",
+            amount,
+            currency,
+          },
+        },
+      },
+    });
+
+    res.json({ ok: true, payment: paymentResp?.data, raw: paymentResp });
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message, details: err.data });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`✅ Duffel backend running on port ${PORT}`);
 });
